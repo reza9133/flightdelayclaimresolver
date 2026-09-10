@@ -3,8 +3,24 @@
 An [Intelligent Contract](https://docs.genlayer.com) on [GenLayer](https://www.genlayer.com/) that adjudicates flight-delay compensation claims. Validators independently fetch live flight-status data from a configurable set of real, authoritative aviation data providers, reach consensus on the facts (via GenLayer's Optimistic Democracy / Equivalence Principle), and an LLM judges eligibility against those facts — all under strict, deterministic evidence validation.
 
 > **Deployed contract:** `0xEF0A558F7411D1B18F9b6Cb76b8967eE55a2FE50`
-> **Network:** / Studionet_
-> Explorer (studionet): `https://explorer-studio.genlayer.com/address/0xEF0A558F7411D1B18F9b6Cb76b8967eE55a2FE50`
+> **Network:** Studionet
+> **Explorer:** `https://explorer-studio.genlayer.com/address/0xEF0A558F7411D1B18F9b6Cb76b8967eE55a2FE50`
+
+---
+
+> ## ⚠️ Required first step — do this before anything else
+>
+> This contract deploys with its data provider **inactive by default** — it will never silently call a placeholder endpoint. Until you run the command below, **every claim will resolve to `UNRESOLVED`**, not because of a bug, but because no live flight-status source is configured yet.
+>
+> ```bash
+> genlayer write \
+>   --contract 0xEF0A558F7411D1B18F9b6Cb76b8967eE55a2FE50 \
+>   --function set_provider_api_key \
+>   --args aviationstack "<YOUR_AVIATIONSTACK_API_KEY>"
+> ```
+>
+> Get a key at [aviationstack.com](https://aviationstack.com). Only the contract **owner** (the deployer account) can call this. See [Security notes](#security-notes) for why this key should be a low-privilege, dedicated, rotatable one.
+
 ---
 
 ## What it does
@@ -81,18 +97,7 @@ Rather than a single hardcoded endpoint, the contract owner manages a small **re
 
 ## Getting started (post-deploy)
 
-The contract deploys with **zero constructor arguments** and its default provider **inactive** — it will never silently call a placeholder or unconfigured endpoint. You must explicitly configure a real API key before any claim can resolve to anything other than `UNRESOLVED`.
-
-```bash
-# 1. Get a real AviationStack API key: https://aviationstack.com
-# 2. Activate the default provider with it
-genlayer write \
-  --contract 0xEF0A558F7411D1B18F9b6Cb76b8967eE55a2FE50 \
-  --function set_provider_api_key \
-  --args aviationstack "<YOUR_AVIATIONSTACK_KEY>"
-```
-
-`set_provider_api_key` automatically flips `active` to `true` once a non-empty key is set. Only the contract **owner** (the deployer) can call any provider-management or ownership method.
+See the **required first step** above. `set_provider_api_key` automatically flips `active` to `true` once a non-empty key is set. Only the contract **owner** (the deployer) can call any provider-management or ownership method.
 
 > ⚠️ **The API key becomes public.** GenLayer contract storage is fully readable on-chain (`gen_getContractState`), and this SDK has no mechanism for validator-side secret injection for web requests. Use a **low-privilege, rate/budget-capped key dedicated to this contract**, and rotate it with `set_provider_api_key` if it's ever abused. This is a fundamental tradeoff of bridging an authenticated off-chain API from an on-chain contract, not a bug in this implementation.
 
