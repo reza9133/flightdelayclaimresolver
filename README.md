@@ -4,7 +4,7 @@ An [Intelligent Contract](https://docs.genlayer.com) on [GenLayer](https://www.g
 
 > **Deployed contract:** `0xEF0A558F7411D1B18F9b6Cb76b8967eE55a2FE50`
 > **Network:** / Studionet_
-> Explorer (studionet): `https://explorer-studio.genlayer.com/address/0xc49d63f60e651700777fA35d0F0aF05AF5AeA928`
+> Explorer (studionet): `https://explorer-studio.genlayer.com/address/0xEF0A558F7411D1B18F9b6Cb76b8967eE55a2FE50`
 ---
 
 ## What it does
