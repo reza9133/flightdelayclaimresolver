@@ -3,7 +3,7 @@
 An [Intelligent Contract](https://docs.genlayer.com) on [GenLayer](https://www.genlayer.com/) that adjudicates flight-delay compensation claims. Validators independently fetch live flight-status data from a configurable set of real, authoritative aviation data providers, reach consensus on the facts (via GenLayer's Optimistic Democracy / Equivalence Principle), and an LLM judges eligibility against those facts — all under strict, deterministic evidence validation.
 
 > **Deployed contract:** `0xEF0A558F7411D1B18F9b6Cb76b8967eE55a2FE50`
-> **Network:** _fill in — e.g. / Studionet_
+> **Network:** / Studionet_
 > Explorer (studionet): `https://explorer-studio.genlayer.com/address/0xc49d63f60e651700777fA35d0F0aF05AF5AeA928`
 ---
 
