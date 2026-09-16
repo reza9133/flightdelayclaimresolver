@@ -1,5 +1,4 @@
 import json
-import datetime as dt
 
 
 AVIATIONSTACK_BODY = json.dumps(
@@ -26,13 +25,20 @@ AVIATIONSTACK_BODY = json.dumps(
     }
 )
 
-LLM_ELIGIBLE_DECISION = json.dumps(
-    {"applicability": "ELIGIBLE", "match_mask": 2, "exclusion_mask": 0}
+LLM_DELAY_CONFIRMED = json.dumps(
+    {"applicability": "DELAY_CONFIRMED", "match_mask": 4, "exclusion_mask": 0}
 )
+
+CONTRACT_PATH = "/home/claude/flight_delay_claim_resolver.py"
+SDK_VERSION = "v0.2.16"
+
+
+def _deploy(direct_deploy):
+    return direct_deploy(CONTRACT_PATH, sdk_version=SDK_VERSION)
 
 
 def _open_and_configure(direct_vm, direct_deploy, direct_alice):
-    contract = direct_deploy("/home/claude/flight_delay_claim_resolver.py", sdk_version="v0.2.16")
+    contract = _deploy(direct_deploy)
 
     # Fix "now" to a date safely after the flight's scheduled day so the
     # 36h assessment gate is already open.
@@ -54,7 +60,7 @@ def _open_and_configure(direct_vm, direct_deploy, direct_alice):
     return contract
 
 
-def test_full_eligible_flow(direct_vm, direct_deploy, direct_alice):
+def test_full_delay_confirmed_flow(direct_vm, direct_deploy, direct_alice):
     contract = _open_and_configure(direct_vm, direct_deploy, direct_alice)
 
     # Sanity: provider is registered + active, no api_key leak in read_providers
@@ -67,33 +73,85 @@ def test_full_eligible_flow(direct_vm, direct_deploy, direct_alice):
     case = contract.read_case("case-1")
     assert case["status"] == "PENDING"
     assert case["earliest_assessment_at"] > 0
+    assert case["entitlement_independently_verified"] is False
 
     direct_vm.mock_web(r"api\.aviationstack\.com", {"status": 200, "body": AVIATIONSTACK_BODY})
-    direct_vm.mock_llm(r".*", LLM_ELIGIBLE_DECISION)
+    direct_vm.mock_llm(r".*", LLM_DELAY_CONFIRMED)
 
     contract.assess_case("case-1", 1)
 
     case = contract.read_case("case-1")
-    assert case["status"] == "ELIGIBLE", case
-    assert case["disposition"] == "COMPENSATION_APPROVED"
+    assert case["status"] == "DELAY_CONFIRMED", case
+    assert case["disposition"] == "FLIGHT_DELAY_ATTESTED"
     assert case["delay_minutes"] == 145
     assert case["severity"] == "MINOR"  # 145 >= 120 (minor) but < 240 (major)
     assert case["provider_used"] == "aviationstack"
     assert case["flight_status_id"] == "BA100-2024-01-10"
     assert len(case["evidence_hash"]) == 64
+    # Route was claimed as LHR->JFK and the (mocked) real flight matches it.
+    assert case["verified_origin_airport"] == "LHR"
+    assert case["verified_destination_airport"] == "JFK"
+    assert case["route_verified"] is True
+    assert case["entitlement_independently_verified"] is False
 
     attempt = contract.read_attempt("case-1", 1)
-    assert attempt["decision"] == "ELIGIBLE"
-    # IDENTITY bit must have been force-set by the contract even though the
-    # mocked LLM never claimed it.
+    assert attempt["decision"] == "DELAY_CONFIRMED"
+    # IDENTITY + ROUTE bits must have been force-set by the contract even
+    # though the mocked LLM never claimed them.
     assert attempt["match_mask"] & 1 == 1  # IDENTITY_BIT
-    assert attempt["match_mask"] & 2 == 2  # DELAY_THRESHOLD_BIT
+    assert attempt["match_mask"] & 2 == 2  # ROUTE_BIT
+    assert attempt["match_mask"] & 4 == 4  # DELAY_THRESHOLD_BIT
+    assert attempt["route_verified"] is True
+
+
+def test_route_mismatch_is_deterministic_and_skips_llm(direct_vm, direct_deploy, direct_alice):
+    contract = _open_and_configure(direct_vm, direct_deploy, direct_alice)
+    wrong_route_body = json.loads(AVIATIONSTACK_BODY)
+    # The flight's REAL route is LHR -> CDG, but the claim says LHR -> JFK.
+    wrong_route_body["data"][0]["arrival"]["iata"] = "CDG"
+    direct_vm.mock_web(r"api\.aviationstack\.com", {"status": 200, "body": json.dumps(wrong_route_body)})
+    # Deliberately NOT mocking the LLM: if the contract's route check is
+    # correctly short-circuiting BEFORE the LLM call, this test passes
+    # without ever needing one. If the short-circuit were broken and the
+    # code fell through to exec_prompt, the unmocked call would raise and
+    # get caught by _classify's broad except -> UNRESOLVED, which would
+    # fail the assertions below just the same.
+
+    contract.assess_case("case-1", 1)
+    case = contract.read_case("case-1")
+    assert case["status"] == "CRITERIA_NOT_MET", case
+    assert case["disposition"] == "CRITERIA_NOT_MET"
+    assert case["route_verified"] is False
+    assert case["verified_origin_airport"] == "LHR"
+    assert case["verified_destination_airport"] == "CDG"  # actual != claimed JFK
+    assert case["severity"] == ""
+
+    attempt = contract.read_attempt("case-1", 1)
+    assert attempt["exclusion_mask"] & 16 == 16  # ROUTE_MISMATCH_BIT
+    assert attempt["match_mask"] & 2 == 0  # ROUTE_BIT must NOT be asserted
+    assert attempt["match_mask"] & 1 == 1  # IDENTITY_BIT still holds (right flight, wrong route)
+
+
+def test_route_unknown_is_unresolved_not_approved(direct_vm, direct_deploy, direct_alice):
+    contract = _open_and_configure(direct_vm, direct_deploy, direct_alice)
+    no_route_body = json.loads(AVIATIONSTACK_BODY)
+    del no_route_body["data"][0]["departure"]["iata"]
+    del no_route_body["data"][0]["arrival"]["iata"]
+    direct_vm.mock_web(r"api\.aviationstack\.com", {"status": 200, "body": json.dumps(no_route_body)})
+    # No LLM mock needed here either — UNKNOWN route also short-circuits.
+
+    contract.assess_case("case-1", 1)
+    case = contract.read_case("case-1")
+    assert case["status"] == "UNRESOLVED"
+    assert case["route_verified"] is False
+    assert case["verified_origin_airport"] == ""
+    assert case["verified_destination_airport"] == ""
 
 
 def test_validator_agrees_with_leader(direct_vm, direct_deploy, direct_alice):
     contract = _open_and_configure(direct_vm, direct_deploy, direct_alice)
     direct_vm.mock_web(r"api\.aviationstack\.com", {"status": 200, "body": AVIATIONSTACK_BODY})
-    direct_vm.mock_llm(r".*", LLM_ELIGIBLE_DECISION)
+    direct_vm.mock_llm(r".*", LLM_DELAY_CONFIRMED)
 
     contract.assess_case("case-1", 1)
     # validator independently re-runs leader_fn/validator_fn with the SAME
@@ -102,7 +160,7 @@ def test_validator_agrees_with_leader(direct_vm, direct_deploy, direct_alice):
 
 
 def test_no_active_provider_yields_unresolved(direct_vm, direct_deploy, direct_alice):
-    contract = direct_deploy("/home/claude/flight_delay_claim_resolver.py", sdk_version="v0.2.16")
+    contract = _deploy(direct_deploy)
     direct_vm.warp("2024-01-13T00:00:00Z")
     direct_vm.sender = direct_alice
     contract.open_case("case-2", "BA100", "Jane Doe", "ABC123", "2024-01-10", "LHR", "JFK")
@@ -114,7 +172,7 @@ def test_no_active_provider_yields_unresolved(direct_vm, direct_deploy, direct_a
 
 
 def test_assess_too_early_reverts(direct_vm, direct_deploy, direct_alice):
-    contract = direct_deploy("/home/claude/flight_delay_claim_resolver.py", sdk_version="v0.2.16")
+    contract = _deploy(direct_deploy)
     # "now" is BEFORE the flight has had a chance to conclude.
     direct_vm.warp("2024-01-10T05:00:00Z")
     contract.set_provider_api_key("aviationstack", "TESTKEY1234567890")
@@ -126,7 +184,7 @@ def test_assess_too_early_reverts(direct_vm, direct_deploy, direct_alice):
 
 
 def test_non_owner_cannot_add_provider(direct_vm, direct_deploy, direct_alice):
-    contract = direct_deploy("/home/claude/flight_delay_claim_resolver.py", sdk_version="v0.2.16")
+    contract = _deploy(direct_deploy)
     direct_vm.sender = direct_alice
     with direct_vm.expect_revert("not the contract owner"):
         contract.add_provider(
@@ -134,21 +192,22 @@ def test_non_owner_cannot_add_provider(direct_vm, direct_deploy, direct_alice):
         )
 
 
-def test_not_eligible_short_delay(direct_vm, direct_deploy, direct_alice):
+def test_criteria_not_met_short_delay(direct_vm, direct_deploy, direct_alice):
     contract = _open_and_configure(direct_vm, direct_deploy, direct_alice)
     short_delay_body = json.loads(AVIATIONSTACK_BODY)
     short_delay_body["data"][0]["arrival"]["delay"] = 30
     short_delay_body["data"][0]["departure"]["delay"] = 10
     direct_vm.mock_web(r"api\.aviationstack\.com", {"status": 200, "body": json.dumps(short_delay_body)})
     direct_vm.mock_llm(
-        r".*", json.dumps({"applicability": "NOT_ELIGIBLE", "match_mask": 0, "exclusion_mask": 2})
+        r".*", json.dumps({"applicability": "CRITERIA_NOT_MET", "match_mask": 0, "exclusion_mask": 8})
     )
     contract.assess_case("case-1", 1)
     case = contract.read_case("case-1")
-    assert case["status"] == "NOT_ELIGIBLE"
-    assert case["disposition"] == "CLAIM_DENIED"
+    assert case["status"] == "CRITERIA_NOT_MET"
+    assert case["disposition"] == "CRITERIA_NOT_MET"
     assert case["severity"] == ""
     assert case["delay_minutes"] == 30
+    assert case["route_verified"] is True  # route was fine; only delay failed
 
 
 def test_cancelled_flight_is_unresolved_without_llm_guess(direct_vm, direct_deploy, direct_alice):
@@ -206,38 +265,44 @@ def test_retry_exhaustion_then_owner_reset(direct_vm, direct_deploy, direct_alic
     assert case["status"] == "PENDING"
     assert case["attempt"] == 1
 
-    # a resolved (ELIGIBLE) case can never be reset
+    # a resolved (DELAY_CONFIRMED) case can never be reset
     direct_vm.clear_mocks()
     direct_vm.mock_web(r"api\.aviationstack\.com", {"status": 200, "body": AVIATIONSTACK_BODY})
-    direct_vm.mock_llm(r".*", LLM_ELIGIBLE_DECISION)
+    direct_vm.mock_llm(r".*", LLM_DELAY_CONFIRMED)
     contract.assess_case("case-1", 1)
-    assert contract.read_case("case-1")["status"] == "ELIGIBLE"
+    assert contract.read_case("case-1")["status"] == "DELAY_CONFIRMED"
     with direct_vm.expect_revert("resolved cases cannot be reset"):
         contract.reset_case_attempts("case-1")
 
 
+def test_scope_disclaimer_present_in_metadata(direct_vm, direct_deploy):
+    contract = _deploy(direct_deploy)
+    meta = contract.read_contract_metadata()
+    assert "compensation" in meta["scope_disclaimer"].lower()
+    assert "NOT verify" in meta["scope_disclaimer"]
+    assert meta["classification"] == "FLIGHT_DELAY_ATTESTATION_ONLY"
+
+
 def test_placeholder_domain_is_gone():
-    with open("/home/claude/flight_delay_claim_resolver.py", "r") as f:
+    with open(CONTRACT_PATH, "r") as f:
         src = f.read()
     assert "flightstatus.example" not in src
     assert "api.aviationstack.com" in src
 
 
-def test_pending_expiry_exceeds_assessment_gate():
-    import sys
-
-    sys.path.insert(0, "/home/claude")
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "flight_contract_constants", "/home/claude/flight_delay_claim_resolver.py"
-    )
-    # We can't import it directly (uses `from genlayer import *`), so just
-    # regex-extract the two constants and check the invariant textually.
-    with open("/home/claude/flight_delay_claim_resolver.py") as f:
+def test_no_overclaiming_status_strings_remain():
+    with open(CONTRACT_PATH, "r") as f:
         src = f.read()
+    assert "COMPENSATION_APPROVED" not in src
+    assert '"ELIGIBLE"' not in src
+    assert '"NOT_ELIGIBLE"' not in src
+
+
+def test_pending_expiry_exceeds_assessment_gate():
     import re
 
+    with open(CONTRACT_PATH) as f:
+        src = f.read()
     pending = int(re.search(r"PENDING_EXPIRY_SECONDS\s*=\s*(\d+)", src).group(1))
     gate = int(re.search(r"MIN_ASSESSMENT_DELAY_SECONDS\s*=\s*(\d+)", src).group(1))
     assert pending > gate, "PENDING_EXPIRY_SECONDS must exceed MIN_ASSESSMENT_DELAY_SECONDS"
