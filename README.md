@@ -2,9 +2,9 @@
 
 An [Intelligent Contract](https://docs.genlayer.com) on [GenLayer](https://www.genlayer.com/) that produces an independently-verified **flight-delay attestation**. Validators fetch live flight-status data from a configurable set of real, authoritative aviation data providers, reach consensus on the facts (via GenLayer's Optimistic Democracy / Equivalence Principle), and an LLM judges delay-eligibility criteria against those facts — all under strict, deterministic evidence validation, including a hard check that the claimed route actually matches the flight.
 
-> **Deployed contract:** `0xCde5d39a64aDbB228F8CB3D29C87102a1Ce134E9`
+> **Deployed contract:** `0xEF0A558F7411D1B18F9b6Cb76b8967eE55a2FE50`
 > **Network:** Studionet
-> **Explorer:** `https://explorer-studio.genlayer.com/address/0xCde5d39a64aDbB228F8CB3D29C87102a1Ce134E9`
+> **Explorer:** `https://explorer-studio.genlayer.com/address/0xEF0A558F7411D1B18F9b6Cb76b8967eE55a2FE50`
 
 ---
 
@@ -68,24 +68,29 @@ assess_case()
   snapshot active providers + case data (deterministic, pre-nondet)
         |
         v
-  ┌───────────────────────────────────────────────────┐
-  │  gl.vm.run_nondet_unsafe(leader_fn, ...)           │
-  │                                                     │
-  │  for provider in providers (priority order):        │
-  │     fetch flight status  ──▶  parse & validate       │
-  │     (first success wins; on failure, try next)       │
-  │                                                     │
-  │  independently verified flight identity + route      │
-  │        |                                             │
-  │        ├─▶ route MISMATCH  ──▶ CRITERIA_NOT_MET       │
-  │        │      (deterministic, LLM never called)      │
-  │        ├─▶ route UNKNOWN   ──▶ UNRESOLVED             │
-  │        │      (insufficient data, LLM never called)  │
-  │        └─▶ route MATCH                               │
-  │               |                                      │
-  │               v                                      │
-  │        LLM delay/cancellation judgment (strict JSON) │
-  └───────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────────────┐
+  │  gl.vm.run_nondet_unsafe(leader_fn, ...)                      │
+  │                                                                │
+  │  for provider in providers (priority order):                   │
+  │     fetch flight status  ──▶  parse & validate                  │
+  │     (first success wins; on failure, try next)                  │
+  │                                                                │
+  │  independently verified flight identity + route                │
+  │        |                                                        │
+  │        ├─▶ route MISMATCH or UNKNOWN ──▶ UNRESOLVED              │
+  │        │      (deterministic, LLM never called, retryable —     │
+  │        │       never a permanent denial from one data point)    │
+  │        └─▶ route MATCH                                          │
+  │               |                                                 │
+  │               ├─▶ LANDED / DIVERTED: delay_minutes vs threshold  │
+  │               │      ──▶ DELAY_CONFIRMED or CRITERIA_NOT_MET     │
+  │               │      (deterministic, LLM never called)          │
+  │               └─▶ CANCELLED: cause is genuinely ambiguous         │
+  │                      ──▶ LLM judges airline-attributable vs.     │
+  │                          extraordinary circumstances (strict     │
+  │                          JSON schema; defaults to UNRESOLVED     │
+  │                          absent a stated cause)                 │
+  └──────────────────────────────────────────────────────────────┘
         |
         v
   validators independently re-run the same pipeline
@@ -94,6 +99,8 @@ assess_case()
         v
   DELAY_CONFIRMED / CRITERIA_NOT_MET / UNRESOLVED  (stored + hashed evidence)
 ```
+
+The LLM is invoked for exactly **one** scenario: a `CANCELLED` flight, where the cause genuinely requires interpretation. Every other branch — identity, route, and the delay-vs-threshold comparison for `LANDED`/`DIVERTED` flights — is a plain, mechanical fact check with no ambiguity, so it's resolved in Python and never touches the model.
 
 ### Provider registry (configurable data sources)
 
@@ -106,11 +113,11 @@ Rather than a single hardcoded endpoint, the contract owner manages a small **re
 ### Evidence & consensus integrity
 
 - **Flight identity** (number + scheduled date) is verified **deterministically in Python**, before any LLM is involved.
-- **Route** (origin/destination airports) is cross-checked **deterministically** against the provider's actual departure/arrival data for that exact flight+date. A mismatch short-circuits straight to `CRITERIA_NOT_MET` — no LLM call, no ambiguity, no retry benefit (the fact won't change).
-- Delay is measured at **arrival** (falling back to departure delay if unavailable), matching how most delay-compensation regimes measure delay.
+- **Route** (origin/destination airports) is cross-checked **deterministically** against the provider's actual departure/arrival data for that exact flight+date. A mismatch or missing route data resolves to `UNRESOLVED`, never a terminal denial — a route disagreement could stem from a claimant mistake or from a single provider's data being wrong, and the contract has no way to tell which, so it never commits to a permanent, non-appealable "no" on that basis alone. The actual verified route (or its absence) stays visible via `verified_origin_airport`/`verified_destination_airport` for a human reviewer regardless.
+- **Delay-vs-threshold** (for `LANDED`/`DIVERTED` flights) is a plain numeric comparison done in Python — there's no genuine ambiguity in "is 145 ≥ 120", so the LLM is never invoked for this, either. Delay is measured at **arrival** (falling back to departure delay if unavailable), matching how most delay-compensation regimes measure delay.
+- **Cancellation cause** is the one dimension that can genuinely require interpretation, and the *only* case where the LLM is invoked — it judges whether a cancellation was airline-attributable or an extraordinary circumstance beyond the airline's control, strictly from whatever the evidence states. AviationStack today doesn't expose a cancellation-cause field, so in practice this almost always (correctly) resolves to `UNRESOLVED`; the architecture is ready for a future provider that does supply one.
 - Every resolved decision is bound to a **SHA-256 evidence hash** that includes the case id, attempt number, chain id, contract address, provider id, and the canonicalized upstream evidence — so a proof cannot be replayed across cases, attempts, chains, or contract instances.
-- A cancelled flight with no stated cause resolves to `UNRESOLVED` rather than the LLM guessing — the contract has no reliable signal for *why* a flight was cancelled, so it fails safe toward human review.
-- The LLM is **never** asked to judge identity or route — those bits (`IDENTITY_BIT`, `ROUTE_BIT`) are forced by the contract itself once its own deterministic checks pass, never taken on trust from model output.
+- The LLM is **never** asked to judge identity, route, or the delay threshold — those bits (`IDENTITY_BIT`, `ROUTE_BIT`, `DELAY_THRESHOLD_BIT`/`DELAY_INSUFFICIENT_BIT`) are set by the contract itself once its own deterministic checks run, never taken on trust from model output. Only `AIRLINE_ATTRIBUTABLE_BIT`/`EXTRAORDINARY_CIRCUMSTANCES_BIT` (cancellations only) come from the model, and even then only when the evidence states a cause directly — never inferred or guessed.
 
 ---
 
@@ -201,8 +208,8 @@ Up to 3 total attempts. If every attempt is exhausted while genuinely stuck (e.g
 
 ```
 PENDING ──assess_case──▶ DELAY_CONFIRMED   (terminal)
-   │                  ╲─▶ CRITERIA_NOT_MET (terminal — short delay, route
-   │                  │                     mismatch, or unattributable
+   │                  ╲─▶ CRITERIA_NOT_MET (terminal — short delay, or an
+   │                  │                     extraordinary-circumstance
    │                  │                     cancellation)
    │                  ╲─▶ UNRESOLVED ──retry_unresolved──▶ PENDING (attempt+1, up to 3)
    │                                  ╲─▶ (attempts exhausted) ──reset_case_attempts(owner)──▶ PENDING
@@ -210,16 +217,20 @@ PENDING ──assess_case──▶ DELAY_CONFIRMED   (terminal)
 ```
 
 - **DELAY_CONFIRMED** ⇒ `disposition = FLIGHT_DELAY_ATTESTED`, `severity` = `MINOR` (≥120 min delay) or `MAJOR` (≥240 min delay). **Not** a compensation approval — see the scope section above.
-- **CRITERIA_NOT_MET** ⇒ `disposition = CRITERIA_NOT_MET`. Check `exclusion_mask`: bit `16` (`ROUTE_MISMATCH_BIT`) means the claimed route didn't match the flight's actual route; bit `8` (`NOT_CANCELLED_BY_PASSENGER`) means a cancellation wasn't attributable to the airline; otherwise the delay was simply below threshold.
-- **UNRESOLVED** ⇒ `disposition = REVIEW_REQUIRED` — ambiguous evidence, missing route data, a data-source outage, or an LLM disagreement; safe to retry.
+- **CRITERIA_NOT_MET** ⇒ `disposition = CRITERIA_NOT_MET`. Check `exclusion_mask`: bit `8` (`DELAY_INSUFFICIENT_BIT`) means the delay was below threshold; bit `32` (`EXTRAORDINARY_CIRCUMSTANCES_BIT`) means a cancellation was judged to be beyond the airline's control.
+- **UNRESOLVED** ⇒ `disposition = REVIEW_REQUIRED` — a route disagreement (mismatched or missing route data — always retryable, never a permanent denial from a single data point), a cancellation with no stated cause, a data-source outage, or an LLM disagreement.
 
-Delay-attestation rule (evaluated over independently-verified evidence, only reached if the route matches): flight status is `LANDED` or `DIVERTED` **and** delay ≥ 120 minutes ⇒ `DELAY_CONFIRMED`; delay clearly below threshold, or a cancellation with no evidence it was airline-caused, ⇒ `CRITERIA_NOT_MET`; anything ambiguous ⇒ `UNRESOLVED`.
+Decision rule, evaluated only once identity + route are independently confirmed:
+- `LANDED` / `DIVERTED` with delay ≥ 120 min ⇒ `DELAY_CONFIRMED` (`DELAY_THRESHOLD_BIT`); below it ⇒ `CRITERIA_NOT_MET` (`DELAY_INSUFFICIENT_BIT`). **Fully deterministic — the LLM is never invoked for this.**
+- `CANCELLED` with evidence the cause was within the airline's control ⇒ `DELAY_CONFIRMED` (`AIRLINE_ATTRIBUTABLE_BIT`); with evidence of an extraordinary circumstance ⇒ `CRITERIA_NOT_MET` (`EXTRAORDINARY_CIRCUMSTANCES_BIT`); with no stated cause (the common case with AviationStack today) ⇒ `UNRESOLVED`. **This is the only scenario that invokes the LLM.**
+- Route mismatch or missing route data, at any flight status ⇒ `UNRESOLVED`, always retryable.
 
 ---
 
 ## Security notes
 
-- **Deterministic identity and route checks; LLM judgment only where genuinely needed.** Flight-number/date matching and the origin/destination route check are enforced in plain Python, entirely before (and independent of) any LLM call — a route mismatch skips the LLM outright. The LLM is scoped only to the remaining, genuinely ambiguous judgment (e.g. cancellation attribution) and is explicitly instructed to treat all case-submitted text as untrusted data, never as instructions.
+- **Deterministic identity, route, and delay-threshold checks; LLM judgment only where genuinely needed.** Flight-number/date identity, the origin/destination route check, and the delay-vs-threshold comparison for `LANDED`/`DIVERTED` flights are all enforced in plain Python — none of them involve any genuine ambiguity, so none of them touch the LLM. The model is invoked for exactly one scenario (a `CANCELLED` flight's cause) and is explicitly instructed to treat all case-submitted text as untrusted data, never as instructions, and to answer `UNRESOLVED` rather than infer a cause that isn't directly stated.
+- **A single bad data point can never produce a permanent wrong answer for route.** Route mismatch and missing route data both resolve to `UNRESOLVED` — retryable, never terminal — because the contract cannot tell whether a disagreement is a claimant mistake or a provider data issue.
 - **Evidence binding.** Every resolved decision's evidence hash is bound to the case id, attempt number, chain id, contract address, and provider used — not replayable elsewhere.
 - **Owner powers are deliberately narrow.** The owner manages data sources and can rescue a *stuck, unresolved* case — it can never overturn a case that consensus already resolved to `DELAY_CONFIRMED`/`CRITERIA_NOT_MET`.
 - **API keys are public information once stored on-chain.** See the warning above — use a low-privilege, dedicated, rotatable key.
@@ -232,7 +243,7 @@ Delay-attestation rule (evaluated over independently-verified evidence, only rea
 The contract has been validated with:
 - `genvm-lint check` — AST safety checks + full SDK-based semantic validation.
 - `pyright` (via `genvm-lint typecheck`) — no type errors.
-- `genlayer-test` direct-mode functional tests (15 scenarios: delay-confirmed/criteria-not-met/unresolved paths, **route match / mismatch / unknown**, validator consensus agreement, provider fallback, time-gating, access control, replay protection, retry exhaustion + owner recovery, resolved-case immutability, and static checks that no placeholder or overclaiming vocabulary remains in the source). See `test_flight_delay_claim_resolver.py`.
+- `genlayer-test` direct-mode functional tests (17 scenarios, including several that deliberately register **no LLM mock at all** to prove the delay-confirmed and short-delay paths never call the model: fully-deterministic delay-confirmed/criteria-not-met flows, route match/mismatch/unknown, both cancellation-cause outcomes plus the no-cause default, validator consensus agreement, provider fallback, time-gating, access control, replay protection, retry exhaustion + owner recovery, resolved-case immutability, and static checks that no placeholder or overclaiming vocabulary remains in the source). See `test_flight_delay_claim_resolver.py`.
 
 ```bash
 pip install genvm-linter genlayer-test
@@ -243,6 +254,6 @@ pytest test_flight_delay_claim_resolver.py -v
 ## Known limitations
 
 - AviationStack's accessible historical depth depends on the subscription tier — a production deployment should use a plan whose lookback window covers `max_claim_age_days` (default ~3 years) worth of claims.
-- The `NOT_CANCELLED_BY_PASSENGER` dimension can rarely be affirmatively proven from flight-status data alone (most providers don't expose cancellation cause) — cancelled-flight claims will typically resolve to `UNRESOLVED` pending human review rather than an automatic determination either way. This is intentional, conservative behavior, not a bug.
+- AviationStack does not expose a cancellation-cause field, so cancelled-flight claims will typically resolve to `UNRESOLVED` pending human review rather than an automatic determination either way. This is intentional, conservative behavior, not a bug — the architecture is ready for a future provider that does supply a cause field.
 - **Passenger identity and booking-reference validity are never verified by this contract** — no publicly accessible, authoritative source for that linkage exists. This is a structural scope boundary, documented on-chain via `scope_disclaimer`, not an oversight. Any payment/escrow logic built on top of this contract's output must independently confirm the claimant actually holds the cited booking.
 - No payment/escrow logic is included by design; wire a downstream contract to `disposition`/`severity`/`route_verified` for payouts, after independently confirming booking ownership.
