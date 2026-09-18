@@ -2,9 +2,9 @@
 
 An [Intelligent Contract](https://docs.genlayer.com) on [GenLayer](https://www.genlayer.com/) that produces an independently-verified **flight-delay attestation**. Validators fetch live flight-status data from a configurable set of real, authoritative aviation data providers, reach consensus on the facts (via GenLayer's Optimistic Democracy / Equivalence Principle), and an LLM judges delay-eligibility criteria against those facts — all under strict, deterministic evidence validation, including a hard check that the claimed route actually matches the flight.
 
-> **Deployed contract:** `0xEF0A558F7411D1B18F9b6Cb76b8967eE55a2FE50`
+> **Deployed contract:** `0x2a867C5b33ec7CfaFa385A1532bB2B6A4eC0fB31`
 > **Network:** Studionet
-> **Explorer:** `https://explorer-studio.genlayer.com/address/0xEF0A558F7411D1B18F9b6Cb76b8967eE55a2FE50`
+> **Explorer:** `https://explorer-studio.genlayer.com/address/0x2a867C5b33ec7CfaFa385A1532bB2B6A4eC0fB31`
 
 ---
 
@@ -14,7 +14,7 @@ An [Intelligent Contract](https://docs.genlayer.com) on [GenLayer](https://www.g
 >
 > ```bash
 > genlayer write \
->   --contract 0xEF0A558F7411D1B18F9b6Cb76b8967eE55a2FE50 \
+>   --contract 0x2a867C5b33ec7CfaFa385A1532bB2B6A4eC0fB31 \
 >   --function set_provider_api_key \
 >   --args aviationstack "<YOUR_AVIATIONSTACK_API_KEY>"
 > ```
